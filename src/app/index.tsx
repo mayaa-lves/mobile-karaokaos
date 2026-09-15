@@ -39,6 +39,12 @@ export default function Index() {
       if (rms < 0.015) {
         return null;
       }
+
+      const frequenciaMinima = 80;
+      const frequenciaMaxima = 1000;
+
+      const deslocamentoMinimo = Math.floor(sampleRate / frequenciaMaxima);
+      const deslocamentoMaximo = Math.floor(sampleRate / frequenciaMinima);
     }
 
   async function ativarMicrofone() {
