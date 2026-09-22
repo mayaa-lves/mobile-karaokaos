@@ -234,6 +234,10 @@ export default function Index() {
   const ultimoEnvioRef =
     useRef(0);
 
+  const [contagemPartida, setContagemPartida] = useState<number | null>(null);
+  const [partidaAtiva, setPartidaAtiva] = useState(false);
+  const timersPartidaRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+
 
   // ====================================================
   // REFERÊNCIAS
@@ -281,6 +285,23 @@ export default function Index() {
       setConectado(false);
     }
 
+    function iniciarPartida() {
+      timersPartidaRef.current.forEach(clearTimeout);
+      timersPartidaRef.current = [];
+      setPartidaAtiva(false);
+      setContagemPartida(3);
+
+      const t1 = setTimeout(() => setContagemPartida(2), 850);
+      const t2 = setTimeout(() => setContagemPartida(1), 1700);
+      const t3 = setTimeout(() => setContagemPartida(0), 2550);
+      const t4 = setTimeout(() => {
+        setContagemPartida(null);
+        setPartidaAtiva(true);
+      }, 3200);
+
+      timersPartidaRef.current = [t1, t2, t3, t4];
+    }
+
     socket.on(
       "connect",
       aoConectar
@@ -295,6 +316,8 @@ export default function Index() {
       "connect_error",
       erroConexao
     );
+
+    socket.on("iniciar_partida", iniciarPartida);
 
     socket.connect();
 
@@ -313,6 +336,10 @@ export default function Index() {
         "connect_error",
         erroConexao
       );
+
+      socket.off("iniciar_partida", iniciarPartida);
+      timersPartidaRef.current.forEach(clearTimeout);
+      timersPartidaRef.current = [];
 
       socket.disconnect();
     };
@@ -722,6 +749,48 @@ export default function Index() {
 
 
   // ====================================================
+  // TELA DA PARTIDA NO CELULAR
+  // ====================================================
+
+  if (contagemPartida !== null) {
+    return (
+      <View style={styles.gameContainer}>
+        <Text style={styles.gameMiniHz}>
+          {frequencia !== null ? `${Math.round(frequencia)} Hz` : "— Hz"}
+        </Text>
+        <View style={styles.countdownWrap}>
+          <Text style={styles.countdownLabel}>PREPARE-SE</Text>
+          <Text style={styles.countdownNumber}>
+            {contagemPartida === 0 ? "VAI!" : contagemPartida}
+          </Text>
+        </View>
+      </View>
+    );
+  }
+
+  if (partidaAtiva) {
+    return (
+      <View style={styles.gameContainer}>
+        <Text style={styles.gameMiniHz}>
+          {frequencia !== null ? `${Math.round(frequencia)} Hz` : "— Hz"}
+        </Text>
+        <View style={styles.gameMicArea}>
+          <View style={[styles.gameMicGlow, vozDetectada && styles.gameMicGlowActive]}>
+            <Text style={styles.gameMicEmoji}>🎤</Text>
+          </View>
+          <View style={styles.gameWave}>
+            {[0.45, 0.75, 1, 0.6, 0.9, 1.15, 0.7, 1, 0.55, 0.85, 0.5].map((multiplicador, index) => {
+              const altura = Math.max(10, Math.min(88, volume * 650 * multiplicador));
+              return <View key={index} style={[styles.gameWaveBar, { height: altura }]} />;
+            })}
+          </View>
+          <Text style={styles.gameStatus}>{vozDetectada ? "CANTANDO..." : "OUVINDO..."}</Text>
+          <Text style={styles.gamePlayer}>JOGADOR {jogador} • {nome}</Text>
+        </View>
+      </View>
+    );
+  }
+
   // TELA
   // ====================================================
 
@@ -1374,6 +1443,20 @@ const styles =
       fontSize: 12,
       textAlign: "center",
     },
+
+    gameContainer: { flex: 1, backgroundColor: "#FFF9F6", alignItems: "center", justifyContent: "center", paddingHorizontal: 24 },
+    gameMiniHz: { position: "absolute", top: 54, right: 22, color: "#8A838B", fontSize: 12, fontWeight: "800" },
+    countdownWrap: { alignItems: "center", justifyContent: "center" },
+    countdownLabel: { color: "#7157FF", fontSize: 13, fontWeight: "900", letterSpacing: 2, marginBottom: 12 },
+    countdownNumber: { color: "#111111", fontSize: 112, lineHeight: 125, fontWeight: "900", letterSpacing: -5 },
+    gameMicArea: { width: "100%", alignItems: "center", justifyContent: "center" },
+    gameMicGlow: { width: 190, height: 190, borderRadius: 95, backgroundColor: "#EEE9FF", alignItems: "center", justifyContent: "center", borderWidth: 5, borderColor: "#E4DCFF" },
+    gameMicGlowActive: { backgroundColor: "#E5DDFF", borderColor: "#7157FF" },
+    gameMicEmoji: { fontSize: 82 },
+    gameWave: { height: 110, width: "100%", flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, marginTop: 28 },
+    gameWaveBar: { width: 7, minHeight: 10, backgroundColor: "#7157FF", borderRadius: 20 },
+    gameStatus: { marginTop: 6, color: "#111111", fontSize: 17, fontWeight: "900", letterSpacing: 1 },
+    gamePlayer: { marginTop: 8, color: "#8A838B", fontSize: 11, fontWeight: "800", letterSpacing: 0.6 },
 
     topDecoration: {
       position: "absolute",
