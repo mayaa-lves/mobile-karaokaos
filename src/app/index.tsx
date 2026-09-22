@@ -1,16 +1,13 @@
 import {
   requestRecordingPermissionsAsync,
+  useAudioRecorder,
+  useAudioPlayer,
   useAudioStream,
+  RecordingPresets,
+  setAudioModeAsync,
 } from "expo-audio";
-
 import { useEffect, useRef, useState } from "react";
-
-import {
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
-
+import { StyleSheet, Text, View, Pressable } from "react-native";
 import { io } from "socket.io-client";
 
 import Logo from "../../components/Logo";
@@ -18,1139 +15,359 @@ import NameInput from "../../components/NameInput";
 import PinInput from "../../components/PinInput";
 import PrimaryButton from "../../components/PrimaryButton";
 
-
-// ======================================================
-// CONFIGURAÇÃO
-// ======================================================
-
 const SERVIDOR = "http://10.142.227.93:8000";
+const socket = io(SERVIDOR, { autoConnect: false });
 
-const socket = io(SERVIDOR, {
-  autoConnect: false,
-});
+type Etapa = "pin" | "nome" | "microfone" | "pronto" | "contagem" | "jogo" | "resultado";
+type RespostaEntrada = { sucesso: boolean; erro?: string; jogador?: number };
 
-type Etapa =
-  | "pin"
-  | "nome"
-  | "microfone"
-  | "pronto";
+function detectarFrequencia(amostras: Float32Array, sampleRate: number): number | null {
+  if (amostras.length < 2) return null;
 
-type RespostaEntrada = {
-  sucesso: boolean;
-  erro?: string;
-  jogador?: number;
-};
+  // Analisa no máximo ~2048 amostras para reduzir travamentos.
+  const passo = Math.max(1, Math.floor(amostras.length / 2048));
+  const reduzidas: number[] = [];
+  for (let i = 0; i < amostras.length; i += passo) reduzidas.push(amostras[i]);
 
+  let soma = 0;
+  for (const a of reduzidas) soma += a * a;
+  const rms = Math.sqrt(soma / reduzidas.length);
+  if (rms < 0.012) return null;
 
-// ======================================================
-// DETECÇÃO DE FREQUÊNCIA
-// ======================================================
-
-function detectarFrequencia(
-  amostras: Float32Array,
-  sampleRate: number
-): number | null {
-  if (amostras.length < 2) {
-    return null;
-  }
-
-  let somaQuadrados = 0;
-
-  for (
-    let i = 0;
-    i < amostras.length;
-    i++
-  ) {
-    somaQuadrados +=
-      amostras[i] *
-      amostras[i];
-  }
-
-  const rms = Math.sqrt(
-    somaQuadrados /
-      amostras.length
-  );
-
-  // Ignora silêncio e ruído baixo
-  if (rms < 0.015) {
-    return null;
-  }
-
-  const menorLag =
-    Math.floor(
-      sampleRate / 1000
-    );
-
-  const maiorLag =
-    Math.min(
-      Math.floor(
-        sampleRate / 80
-      ),
-      amostras.length - 1
-    );
+  const menorLag = Math.max(1, Math.floor(sampleRate / passo / 1000));
+  const maiorLag = Math.min(Math.floor(sampleRate / passo / 80), reduzidas.length - 1);
 
   let melhorLag = -1;
-  let melhorCorrelacao = 0;
+  let melhor = 0;
 
-  for (
-    let lag = menorLag;
-    lag <= maiorLag;
-    lag++
-  ) {
-    let correlacao = 0;
-    let energiaA = 0;
-    let energiaB = 0;
-
-    const limite =
-      amostras.length - lag;
-
-    for (
-      let i = 0;
-      i < limite;
-      i++
-    ) {
-      const a = amostras[i];
-      const b =
-        amostras[i + lag];
-
+  for (let lag = menorLag; lag <= maiorLag; lag++) {
+    let correlacao = 0, energiaA = 0, energiaB = 0;
+    const limite = reduzidas.length - lag;
+    for (let i = 0; i < limite; i++) {
+      const a = reduzidas[i];
+      const b = reduzidas[i + lag];
       correlacao += a * b;
       energiaA += a * a;
       energiaB += b * b;
     }
-
-    const denominador =
-      Math.sqrt(
-        energiaA * energiaB
-      );
-
-    if (
-      denominador === 0
-    ) {
-      continue;
-    }
-
-    const correlacaoNormalizada =
-      correlacao /
-      denominador;
-
-    if (
-      correlacaoNormalizada >
-      melhorCorrelacao
-    ) {
-      melhorCorrelacao =
-        correlacaoNormalizada;
-
-      melhorLag = lag;
-    }
+    const den = Math.sqrt(energiaA * energiaB);
+    if (!den) continue;
+    const c = correlacao / den;
+    if (c > melhor) { melhor = c; melhorLag = lag; }
   }
 
-  /*
-    Se o sinal não tem periodicidade
-    suficiente, provavelmente é ruído,
-    fala muito irregular ou detecção ruim.
-  */
-
-  if (
-    melhorLag <= 0 ||
-    melhorCorrelacao < 0.72
-  ) {
-    return null;
-  }
-
-  const frequencia =
-    sampleRate /
-    melhorLag;
-
-  if (
-    frequencia < 80 ||
-    frequencia > 1000
-  ) {
-    return null;
-  }
-
-  return frequencia;
+  if (melhorLag <= 0 || melhor < 0.60) return null;
+  const hz = (sampleRate / passo) / melhorLag;
+  return hz >= 80 && hz <= 1000 ? hz : null;
 }
 
-
-// ======================================================
-// APP
-// ======================================================
-
 export default function Index() {
-  const [etapa, setEtapa] =
-    useState<Etapa>("pin");
+  const [etapa, setEtapa] = useState<Etapa>("pin");
+  const [pin, setPin] = useState("");
+  const [nome, setNome] = useState("");
+  const [erroPin, setErroPin] = useState("");
+  const [erroNome, setErroNome] = useState("");
+  const [conectado, setConectado] = useState(false);
+  const [jogador, setJogador] = useState<number | null>(null);
+  const [microfoneAtivo, setMicrofoneAtivo] = useState(false);
+  const [volume, setVolume] = useState(0);
+  const [frequencia, setFrequencia] = useState<number | null>(null);
+  const [contagem, setContagem] = useState(3);
+  const [gravandoMomento, setGravandoMomento] = useState(false);
+  const [gravacaoUri, setGravacaoUri] = useState<string | null>(null);
 
-  const [pin, setPin] =
-    useState("");
+  const pinRef = useRef("");
+  const jogadorRef = useRef<number | null>(null);
+  const ultimoEnvioRef = useRef(0);
+  const timerInicioRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timerFimRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [nome, setNome] =
-    useState("");
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const player = useAudioPlayer(gravacaoUri);
 
-  const [erroPin, setErroPin] =
-    useState("");
+  useEffect(() => { pinRef.current = pin; }, [pin]);
+  useEffect(() => { jogadorRef.current = jogador; }, [jogador]);
 
-  const [
-    erroNome,
-    setErroNome,
-  ] = useState("");
+  async function iniciarTrechoGravado() {
+    try {
+      setGravacaoUri(null);
+      await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true });
+      await recorder.prepareToRecordAsync();
+      recorder.record({ forDuration: 10 });
+      setGravandoMomento(true);
 
-  const [
-    conectado,
-    setConectado,
-  ] = useState(false);
+      timerFimRef.current = setTimeout(async () => {
+        try {
+          if (recorder.isRecording) await recorder.stop();
+          setGravandoMomento(false);
+          if (recorder.uri) setGravacaoUri(recorder.uri);
+        } catch (e) {
+          console.log("Erro ao finalizar gravação:", e);
+        }
+      }, 10200);
+    } catch (e) {
+      console.log("Erro ao gravar momento:", e);
+      setGravandoMomento(false);
+    }
+  }
 
-  const [
-    jogador,
-    setJogador,
-  ] =
-    useState<number | null>(
-      null
-    );
-
-  const [
-    microfoneAtivo,
-    setMicrofoneAtivo,
-  ] = useState(false);
-
-  const [volume, setVolume] =
-    useState(0);
-
-  const [
-    frequencia,
-    setFrequencia,
-  ] =
-    useState<number | null>(
-      null
-    );
-
-  const pinRef =
-    useRef("");
-
-  const jogadorRef =
-    useRef<number | null>(
-      null
-    );
-
-  const ultimoEnvioRef =
-    useRef(0);
-
-  const [contagemPartida, setContagemPartida] = useState<number | null>(null);
-  const [partidaAtiva, setPartidaAtiva] = useState(false);
-  const timersPartidaRef = useRef<ReturnType<typeof setTimeout>[]>([]);
-
-
-  // ====================================================
-  // REFERÊNCIAS
-  // ====================================================
+  function prepararGravacaoAleatoria() {
+    // Entre 20s e 155s da música, evitando intro/final.
+    const atraso = 20000 + Math.floor(Math.random() * 135000);
+    if (timerInicioRef.current) clearTimeout(timerInicioRef.current);
+    timerInicioRef.current = setTimeout(iniciarTrechoGravado, atraso);
+  }
 
   useEffect(() => {
-    pinRef.current = pin;
-  }, [pin]);
+    function aoConectar() { setConectado(true); }
+    function aoDesconectar() { setConectado(false); }
+    function erroConexao() { setConectado(false); }
 
-  useEffect(() => {
-    jogadorRef.current =
-      jogador;
-  }, [jogador]);
+    function partidaIniciada() {
+      setContagem(3);
+      setEtapa("contagem");
+      prepararGravacaoAleatoria();
 
-
-  // ====================================================
-  // SOCKET
-  // ====================================================
-
-  useEffect(() => {
-    function aoConectar() {
-      console.log(
-        "Conectado ao servidor!"
-      );
-
-      setConectado(true);
+      setTimeout(() => setContagem(2), 850);
+      setTimeout(() => setContagem(1), 1700);
+      setTimeout(() => setContagem(0), 2550);
+      setTimeout(() => setEtapa("jogo"), 3200);
     }
 
-    function aoDesconectar() {
-      console.log(
-        "Servidor desconectado."
-      );
-
-      setConectado(false);
+    function partidaFinalizada() {
+      if (timerInicioRef.current) clearTimeout(timerInicioRef.current);
+      if (timerFimRef.current) clearTimeout(timerFimRef.current);
+      (async () => {
+        try {
+          if (recorder.isRecording) {
+            await recorder.stop();
+            if (recorder.uri) setGravacaoUri(recorder.uri);
+          }
+        } catch {}
+        setGravandoMomento(false);
+        setEtapa("resultado");
+      })();
     }
 
-    function erroConexao(
-      erro: Error
-    ) {
-      console.log(
-        "Erro Socket.IO:",
-        erro.message
-      );
-
-      setConectado(false);
-    }
-
-    function iniciarPartida() {
-      timersPartidaRef.current.forEach(clearTimeout);
-      timersPartidaRef.current = [];
-      setPartidaAtiva(false);
-      setContagemPartida(3);
-
-      const t1 = setTimeout(() => setContagemPartida(2), 850);
-      const t2 = setTimeout(() => setContagemPartida(1), 1700);
-      const t3 = setTimeout(() => setContagemPartida(0), 2550);
-      const t4 = setTimeout(() => {
-        setContagemPartida(null);
-        setPartidaAtiva(true);
-      }, 3200);
-
-      timersPartidaRef.current = [t1, t2, t3, t4];
-    }
-
-    socket.on(
-      "connect",
-      aoConectar
-    );
-
-    socket.on(
-      "disconnect",
-      aoDesconectar
-    );
-
-    socket.on(
-      "connect_error",
-      erroConexao
-    );
-
-    socket.on("iniciar_partida", iniciarPartida);
-
+    socket.on("connect", aoConectar);
+    socket.on("disconnect", aoDesconectar);
+    socket.on("connect_error", erroConexao);
+    socket.on("partida_iniciada", partidaIniciada);
+    socket.on("partida_finalizada", partidaFinalizada);
     socket.connect();
 
     return () => {
-      socket.off(
-        "connect",
-        aoConectar
-      );
-
-      socket.off(
-        "disconnect",
-        aoDesconectar
-      );
-
-      socket.off(
-        "connect_error",
-        erroConexao
-      );
-
-      socket.off("iniciar_partida", iniciarPartida);
-      timersPartidaRef.current.forEach(clearTimeout);
-      timersPartidaRef.current = [];
-
+      socket.off("connect", aoConectar);
+      socket.off("disconnect", aoDesconectar);
+      socket.off("connect_error", erroConexao);
+      socket.off("partida_iniciada", partidaIniciada);
+      socket.off("partida_finalizada", partidaFinalizada);
+      if (timerInicioRef.current) clearTimeout(timerInicioRef.current);
+      if (timerFimRef.current) clearTimeout(timerFimRef.current);
       socket.disconnect();
     };
   }, []);
 
+  const stream = useAudioStream({
+    sampleRate: 44100,
+    channels: 1,
+    onBuffer: (buffer) => {
+      const amostras = new Float32Array(buffer.data);
+      if (!amostras.length) return;
 
-  // ====================================================
-  // MICROFONE
-  // ====================================================
+      let soma = 0;
+      for (let i = 0; i < amostras.length; i++) soma += amostras[i] * amostras[i];
+      const rms = Math.sqrt(soma / amostras.length);
 
-  const stream =
-    useAudioStream({
-      sampleRate: 44100,
-      channels: 1,
+      const agora = Date.now();
+      // UI reage ao RMS mesmo se o pitch não for reconhecido.
+      setVolume(rms);
 
-      onBuffer: (buffer) => {
-        const amostras =
-          new Float32Array(
-            buffer.data
-          );
+      // Pitch só é calculado/enviado ~6x/s para aliviar o celular.
+      if (agora - ultimoEnvioRef.current < 160) return;
+      const hz = detectarFrequencia(amostras, 44100);
+      setFrequencia(hz);
 
-        if (
-          amostras.length === 0
-        ) {
-          return;
-        }
+      if (!pinRef.current || jogadorRef.current === null) return;
+      ultimoEnvioRef.current = agora;
+      socket.emit("dados_microfone", {
+        pin: pinRef.current,
+        jogador: jogadorRef.current,
+        volume: rms,
+        frequencia: hz,
+        timestamp: agora,
+      });
+    },
+  });
 
-        let somaQuadrados = 0;
-
-        for (
-          let i = 0;
-          i <
-          amostras.length;
-          i++
-        ) {
-          somaQuadrados +=
-            amostras[i] *
-            amostras[i];
-        }
-
-        const rms =
-          Math.sqrt(
-            somaQuadrados /
-              amostras.length
-          );
-
-        const hz =
-          detectarFrequencia(
-            amostras,
-            44100
-          );
-
-        setVolume(rms);
-        setFrequencia(hz);
-
-        const agora =
-          Date.now();
-
-        /*
-          Envia no máximo aproximadamente
-          6 vezes por segundo.
-        */
-
-        if (
-          agora -
-            ultimoEnvioRef.current <
-          160
-        ) {
-          return;
-        }
-
-        if (
-          !pinRef.current ||
-          jogadorRef.current ===
-            null
-        ) {
-          return;
-        }
-
-        ultimoEnvioRef.current =
-          agora;
-
-        socket.emit(
-          "dados_microfone",
-          {
-            pin:
-              pinRef.current,
-
-            jogador:
-              jogadorRef.current,
-
-            volume: rms,
-
-            frequencia: hz,
-
-            timestamp: agora,
-          }
-        );
-      },
-    });
-
-
-  // ====================================================
-  // PIN
-  // ====================================================
-
-  function alterarPin(
-    texto: string
-  ) {
-    const apenasNumeros =
-      texto.replace(
-        /\D/g,
-        ""
-      );
-
-    setPin(
-      apenasNumeros.slice(
-        0,
-        4
-      )
-    );
-
+  function alterarPin(texto: string) {
+    setPin(texto.replace(/\D/g, "").slice(0, 4));
     setErroPin("");
   }
 
   function continuarPin() {
-    if (pin.length !== 4) {
-      setErroPin(
-        "Digite o PIN de 4 dígitos."
-      );
-
-      return;
-    }
-
-    if (!conectado) {
-      setErroPin(
-        "O servidor ainda não está conectado."
-      );
-
-      return;
-    }
-
+    if (pin.length !== 4) return setErroPin("Digite o PIN de 4 dígitos.");
+    if (!conectado) return setErroPin("O servidor ainda não está conectado.");
     setEtapa("nome");
   }
 
-
-  // ====================================================
-  // NOME / ENTRAR NA SALA
-  // ====================================================
-
-  function alterarNome(
-    texto: string
-  ) {
-    setNome(texto);
-    setErroNome("");
-  }
-
   function entrarNaSala() {
-    const nomeLimpo =
-      nome.trim();
+    const nomeLimpo = nome.trim();
+    if (!nomeLimpo) return setErroNome("Digite seu nome.");
 
-    if (!nomeLimpo) {
-      setErroNome(
-        "Digite seu nome."
-      );
-
-      return;
-    }
-
-    socket.emit(
-      "entrar_sala",
-
-      {
-        pin,
-        nome: nomeLimpo,
-      },
-
-      (
-        resposta: RespostaEntrada
-      ) => {
-        if (
-          !resposta.sucesso
-        ) {
-          setErroPin(
-            resposta.erro ??
-              "Não foi possível entrar na sala."
-          );
-
-          setEtapa("pin");
-
-          return;
-        }
-
-        setNome(nomeLimpo);
-
-        setJogador(
-          resposta.jogador ??
-            null
-        );
-
-        setEtapa(
-          "microfone"
-        );
+    socket.emit("entrar_sala", { pin, nome: nomeLimpo }, (resposta: RespostaEntrada) => {
+      if (!resposta.sucesso) {
+        setErroPin(resposta.erro ?? "Não foi possível entrar na sala.");
+        setEtapa("pin");
+        return;
       }
-    );
+      setNome(nomeLimpo);
+      setJogador(resposta.jogador ?? null);
+      setEtapa("microfone");
+    });
   }
-
-
-  // ====================================================
-  // PERMISSÃO DO MICROFONE
-  // ====================================================
 
   async function ativarMicrofone() {
     try {
-      const permissao =
-        await requestRecordingPermissionsAsync();
-
-      if (
-        !permissao.granted
-      ) {
-        return;
-      }
-
+      const permissao = await requestRecordingPermissionsAsync();
+      if (!permissao.granted) return;
+      await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true });
       await stream.stream.start();
-
-      setMicrofoneAtivo(
-        true
-      );
-    } catch (erro) {
-      console.log(
-        "Erro ao ativar microfone:",
-        erro
-      );
+      setMicrofoneAtivo(true);
+    } catch (e) {
+      console.log("Erro ao ativar microfone:", e);
     }
   }
 
+  const audioCaptado = volume > 0.008;
+  const intensidade = Math.min(1, Math.max(0.08, volume * 18));
+  const barras = [0.45, 0.75, 1, 0.6, 0.9, 1.15, 0.7, 1, 0.55, 0.85, 0.5];
 
-  // ====================================================
-  // VISUALIZAÇÃO DO MICROFONE
-  // ====================================================
-
-  const volumePercentual =
-    Math.min(
-      100,
-      Math.max(
-        2,
-        volume * 650
-      )
-    );
-
-  const vozDetectada =
-    frequencia !== null;
-
-  function PainelMicrofone() {
+  function Onda() {
     return (
-      <View
-        style={
-          styles.micCard
-        }
-      >
-        <View
-          style={
-            styles.liveRow
-          }
-        >
-          <View
-            style={[
-              styles.liveDot,
-              vozDetectada &&
-                styles.liveDotActive,
-            ]}
-          />
-
-          <Text
-            style={
-              styles.liveText
-            }
-          >
-            MICROFONE ATIVO
-          </Text>
-        </View>
-
-        <View
-          style={
-            styles.microphoneCircle
-          }
-        >
-          <Text
-            style={
-              styles.microphoneEmoji
-            }
-          >
-            🎤
-          </Text>
-        </View>
-
-        <Text
-          style={
-            styles.frequency
-          }
-        >
-          {frequencia !== null
-            ? `${Math.round(
-                frequencia
-              )} Hz`
-            : "— Hz"}
-        </Text>
-
-        <Text
-          style={
-            styles.detectionText
-          }
-        >
-          {vozDetectada
-            ? "VOZ DETECTADA"
-            : "Cante para testar"}
-        </Text>
-
-        <View
-          style={
-            styles.volumeContainer
-          }
-        >
-          <View
-            style={[
-              styles.volumeBar,
-              {
-                width: `${volumePercentual}%`,
-              },
-            ]}
-          />
-        </View>
-
-        <View
-          style={
-            styles.wave
-          }
-        >
-          {[
-            0.45,
-            0.75,
-            1,
-            0.6,
-            0.9,
-            1.15,
-            0.7,
-            1,
-            0.55,
-            0.85,
-            0.5,
-          ].map(
-            (
-              multiplicador,
-              index
-            ) => {
-              const altura =
-                Math.max(
-                  7,
-                  Math.min(
-                    52,
-                    volume *
-                      400 *
-                      multiplicador
-                  )
-                );
-
-              return (
-                <View
-                  key={index}
-                  style={[
-                    styles.waveBar,
-                    {
-                      height:
-                        altura,
-                    },
-                  ]}
-                />
-              );
-            }
-          )}
-        </View>
-
-        <View
-          style={
-            styles.sendingBox
-          }
-        >
-          <View
-            style={
-              styles.sendingDot
-            }
-          />
-
-          <Text
-            style={
-              styles.sendingText
-            }
-          >
-            {conectado
-              ? "ENVIANDO DADOS PARA O JOGO"
-              : "SERVIDOR DESCONECTADO"}
-          </Text>
-        </View>
+      <View style={styles.wave}>
+        {barras.map((m, i) => (
+          <View key={i} style={[styles.waveBar, { height: Math.max(8, Math.min(82, 70 * intensidade * m)) }]} />
+        ))}
       </View>
     );
   }
 
-
-  // ====================================================
-  // TELA DA PARTIDA NO CELULAR
-  // ====================================================
-
-  if (contagemPartida !== null) {
+  if (etapa === "contagem") {
     return (
       <View style={styles.gameContainer}>
-        <Text style={styles.gameMiniHz}>
-          {frequencia !== null ? `${Math.round(frequencia)} Hz` : "— Hz"}
-        </Text>
-        <View style={styles.countdownWrap}>
-          <Text style={styles.countdownLabel}>PREPARE-SE</Text>
-          <Text style={styles.countdownNumber}>
-            {contagemPartida === 0 ? "VAI!" : contagemPartida}
-          </Text>
-        </View>
+        <Text style={styles.miniBrand}>KARAOKE <Text style={styles.purple}>CHAOS</Text></Text>
+        <Text style={styles.countdown}>{contagem > 0 ? contagem : "VAI!"}</Text>
+        <Text style={styles.gameHint}>Prepare o microfone 🎤</Text>
       </View>
     );
   }
 
-  if (partidaAtiva) {
+  if (etapa === "jogo") {
     return (
       <View style={styles.gameContainer}>
-        <Text style={styles.gameMiniHz}>
-          {frequencia !== null ? `${Math.round(frequencia)} Hz` : "— Hz"}
-        </Text>
-        <View style={styles.gameMicArea}>
-          <View style={[styles.gameMicGlow, vozDetectada && styles.gameMicGlowActive]}>
-            <Text style={styles.gameMicEmoji}>🎤</Text>
-          </View>
-          <View style={styles.gameWave}>
-            {[0.45, 0.75, 1, 0.6, 0.9, 1.15, 0.7, 1, 0.55, 0.85, 0.5].map((multiplicador, index) => {
-              const altura = Math.max(10, Math.min(88, volume * 650 * multiplicador));
-              return <View key={index} style={[styles.gameWaveBar, { height: altura }]} />;
-            })}
-          </View>
-          <Text style={styles.gameStatus}>{vozDetectada ? "CANTANDO..." : "OUVINDO..."}</Text>
-          <Text style={styles.gamePlayer}>JOGADOR {jogador} • {nome}</Text>
+        <View style={styles.hzCorner}>
+          <Text style={styles.hzSmall}>{frequencia ? `${Math.round(frequencia)} Hz` : "— Hz"}</Text>
         </View>
+
+        {gravandoMomento && (
+          <View style={styles.recordingBadge}>
+            <Text style={styles.recordingText}>● GRAVANDO MOMENTO</Text>
+          </View>
+        )}
+
+        <View style={[styles.bigMic, audioCaptado && styles.bigMicActive]}>
+          <Text style={styles.bigMicEmoji}>🎤</Text>
+        </View>
+        <Onda />
+        <Text style={[styles.captureText, audioCaptado && styles.captureTextActive]}>
+          {audioCaptado ? "ÁUDIO CAPTADO" : "OUVINDO..."}
+        </Text>
+        <Text style={styles.gameHint}>Acompanhe a letra no computador</Text>
       </View>
     );
   }
 
-  // TELA
-  // ====================================================
+  if (etapa === "resultado") {
+    return (
+      <View style={styles.gameContainer}>
+        <Text style={styles.miniBrand}>KARAOKE <Text style={styles.purple}>CHAOS</Text></Text>
+        <Text style={styles.resultTitle}>Seu momento 🎙️</Text>
+        <Text style={styles.resultSubtitle}>
+          {gravacaoUri ? "O celular gravou um trecho da sua apresentação." : "Não foi possível salvar o trecho desta vez."}
+        </Text>
+        {gravacaoUri && (
+          <Pressable style={styles.playButton} onPress={() => { player.seekTo(0); player.play(); }}>
+            <Text style={styles.playButtonText}>▶ OUVIR GRAVAÇÃO</Text>
+          </Pressable>
+        )}
+        <Text style={styles.gameHint}>Resultado e pontuação estão no computador.</Text>
+      </View>
+    );
+  }
 
   return (
-    <View
-      style={
-        styles.container
-      }
-    >
-      <View
-        style={
-          styles.topDecoration
-        }
-      />
-
-      <View
-        style={
-          styles.bottomDecoration
-        }
-      />
-
-      <View
-        style={
-          styles.content
-        }
-      >
+    <View style={styles.container}>
+      <View style={styles.topDecoration} />
+      <View style={styles.bottomDecoration} />
+      <View style={styles.content}>
         <Logo />
 
-        {/* PIN */}
-
         {etapa === "pin" && (
-          <View
-            style={
-              styles.section
-            }
-          >
-            <Text
-              style={
-                styles.step
-              }
-            >
-              PASSO 1 DE 4
-            </Text>
-
-            <Text
-              style={
-                styles.title
-              }
-            >
-              Entre na sala
-            </Text>
-
-            <Text
-              style={
-                styles.subtitle
-              }
-            >
-              Digite o PIN que
-              aparece no computador.
-            </Text>
-
-            <PinInput
-              value={pin}
-              onChangeText={
-                alterarPin
-              }
-              error={erroPin}
-            />
-
-            <PrimaryButton
-              title="ENTRAR  →"
-              onPress={
-                continuarPin
-              }
-            />
-
-            <View
-              style={
-                styles.statusRow
-              }
-            >
-              <View
-                style={[
-                  styles.statusDot,
-                  conectado
-                    ? styles.online
-                    : styles.offline,
-                ]}
-              />
-
-              <Text
-                style={
-                  styles.statusText
-                }
-              >
-                {conectado
-                  ? "Servidor conectado"
-                  : "Conectando ao servidor..."}
-              </Text>
-            </View>
+          <View style={styles.section}>
+            <Text style={styles.step}>PASSO 1 DE 4</Text>
+            <Text style={styles.title}>Entre na sala</Text>
+            <Text style={styles.subtitle}>Digite o PIN que aparece no computador.</Text>
+            <PinInput value={pin} onChangeText={alterarPin} error={erroPin} />
+            <PrimaryButton title="ENTRAR  →" onPress={continuarPin} />
+            <Text style={styles.statusText}>{conectado ? "● Servidor conectado" : "○ Conectando ao servidor..."}</Text>
           </View>
         )}
 
-
-        {/* NOME */}
-
-        {etapa ===
-          "nome" && (
-          <View
-            style={
-              styles.section
-            }
-          >
-            <Text
-              style={
-                styles.step
-              }
-            >
-              PASSO 2 DE 4
-            </Text>
-
-            <Text
-              style={
-                styles.title
-              }
-            >
-              Quem vai cantar?
-            </Text>
-
-            <Text
-              style={
-                styles.subtitle
-              }
-            >
-              Seu nome aparecerá
-              no placar da partida.
-            </Text>
-
-            <NameInput
-              value={nome}
-              onChangeText={
-                alterarNome
-              }
-              error={erroNome}
-            />
-
-            <PrimaryButton
-              title="CONTINUAR  →"
-              onPress={
-                entrarNaSala
-              }
-            />
+        {etapa === "nome" && (
+          <View style={styles.section}>
+            <Text style={styles.step}>PASSO 2 DE 4</Text>
+            <Text style={styles.title}>Quem vai cantar?</Text>
+            <Text style={styles.subtitle}>Seu nome aparecerá no placar da partida.</Text>
+            <NameInput value={nome} onChangeText={(t) => { setNome(t); setErroNome(""); }} error={erroNome} />
+            <PrimaryButton title="CONTINUAR  →" onPress={entrarNaSala} />
           </View>
         )}
 
-
-        {/* MICROFONE */}
-
-        {etapa ===
-          "microfone" && (
-          <View
-            style={
-              styles.section
-            }
-          >
-            <Text
-              style={
-                styles.step
-              }
-            >
-              PASSO 3 DE 4
-            </Text>
-
-            {jogador !==
-              null && (
-              <View
-                style={
-                  styles.playerPill
-                }
-              >
-                <Text
-                  style={
-                    styles.playerPillText
-                  }
-                >
-                  JOGADOR{" "}
-                  {jogador}
-                </Text>
-              </View>
-            )}
-
+        {etapa === "microfone" && (
+          <View style={styles.section}>
+            <Text style={styles.step}>PASSO 3 DE 4</Text>
+            <View style={styles.playerPill}><Text style={styles.playerPillText}>JOGADOR {jogador}</Text></View>
             {!microfoneAtivo ? (
               <>
-                <Text
-                  style={
-                    styles.title
-                  }
-                >
-                  Ative seu
-                  microfone
-                </Text>
-
-                <Text
-                  style={
-                    styles.subtitle
-                  }
-                >
-                  Usamos o áudio
-                  para analisar o
-                  volume e a
-                  frequência da sua
-                  voz em tempo real.
-                </Text>
-
-                <View
-                  style={
-                    styles.permissionMic
-                  }
-                >
-                  <Text
-                    style={
-                      styles.permissionEmoji
-                    }
-                  >
-                    🎤
-                  </Text>
-                </View>
-
-                <PrimaryButton
-                  title="ATIVAR MICROFONE"
-                  onPress={
-                    ativarMicrofone
-                  }
-                />
-
-                <Text
-                  style={
-                    styles.privacy
-                  }
-                >
-                  O protótipo envia
-                  apenas os dados
-                  analisados para o
-                  jogo.
-                </Text>
+                <Text style={styles.title}>Ative seu microfone</Text>
+                <Text style={styles.subtitle}>O áudio será analisado em tempo real.</Text>
+                <View style={styles.permissionMic}><Text style={styles.permissionEmoji}>🎤</Text></View>
+                <PrimaryButton title="ATIVAR MICROFONE" onPress={ativarMicrofone} />
               </>
             ) : (
               <>
-                <Text
-                  style={
-                    styles.title
-                  }
-                >
-                  Funcionando! 🎤
-                </Text>
-
-                <Text
-                  style={
-                    styles.subtitle
-                  }
-                >
-                  Fale ou cante e
-                  veja o sensor
-                  reagir.
-                </Text>
-
-                <PainelMicrofone />
-
-                <PrimaryButton
-                  title="ESTOU PRONTO  →"
-                  onPress={() =>
-                    setEtapa(
-                      "pronto"
-                    )
-                  }
-                />
+                <Text style={styles.title}>Funcionando! 🎤</Text>
+                <Text style={styles.subtitle}>Fale ou cante. As ondas reagem ao áudio captado.</Text>
+                <View style={styles.testCard}>
+                  <Text style={styles.testStatus}>{audioCaptado ? "● ÁUDIO CAPTADO" : "○ OUVINDO..."}</Text>
+                  <Onda />
+                  <Text style={styles.testHz}>{frequencia ? `${Math.round(frequencia)} Hz` : "tom ainda não identificado"}</Text>
+                </View>
+                <PrimaryButton title="ESTOU PRONTO  →" onPress={() => setEtapa("pronto")} />
               </>
             )}
           </View>
         )}
 
-
-        {/* PRONTO */}
-
-        {etapa ===
-          "pronto" && (
-          <View
-            style={
-              styles.section
-            }
-          >
-            <Text
-              style={
-                styles.step
-              }
-            >
-              PASSO 4 DE 4
-            </Text>
-
-            <View
-              style={
-                styles.playerPill
-              }
-            >
-              <Text
-                style={
-                  styles.playerPillText
-                }
-              >
-                JOGADOR{" "}
-                {jogador}
-              </Text>
-            </View>
-
-            <Text
-              style={
-                styles.title
-              }
-            >
-              Tudo pronto,
-              {" "}
-              {nome}! 🔥
-            </Text>
-
-            <Text
-              style={
-                styles.subtitle
-              }
-            >
-              Agora é só acompanhar
-              a letra no computador
-              e cantar quando for
-              sua vez.
-            </Text>
-
-            <PainelMicrofone />
-
-            <View
-              style={
-                styles.roomConnected
-              }
-            >
-              <Text
-                style={
-                  styles.roomConnectedText
-                }
-              >
-                ● CONECTADO À SALA{" "}
-                {pin}
-              </Text>
-            </View>
-
-            <Text
-              style={
-                styles.waiting
-              }
-            >
-              Aguardando o jogo
-              começar no computador...
-            </Text>
+        {etapa === "pronto" && (
+          <View style={styles.section}>
+            <Text style={styles.step}>PASSO 4 DE 4</Text>
+            <View style={styles.playerPill}><Text style={styles.playerPillText}>JOGADOR {jogador}</Text></View>
+            <Text style={styles.title}>Tudo pronto, {nome}! 🔥</Text>
+            <Text style={styles.subtitle}>Quando a partida começar no computador, esta tela muda automaticamente.</Text>
+            <View style={styles.testCard}><Text style={styles.testStatus}>{audioCaptado ? "● MICROFONE CAPTANDO" : "○ MICROFONE ATIVO"}</Text><Onda /></View>
+            <Text style={styles.waiting}>Aguardando o jogo começar...</Text>
           </View>
         )}
       </View>
@@ -1158,325 +375,43 @@ export default function Index() {
   );
 }
 
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: "#FFF9F6", overflow: "hidden" },
+  content: { flex: 1, paddingHorizontal: 24, paddingTop: 55, paddingBottom: 28, alignItems: "center", justifyContent: "center", zIndex: 2 },
+  section: { width: "100%", maxWidth: 360, alignItems: "center", gap: 14, marginTop: 24 },
+  step: { fontSize: 11, fontWeight: "900", letterSpacing: 1.5, color: "#7157FF" },
+  title: { color: "#111", fontSize: 28, lineHeight: 34, fontWeight: "900", textAlign: "center" },
+  subtitle: { maxWidth: 320, color: "#777078", fontSize: 14, lineHeight: 21, textAlign: "center" },
+  statusText: { color: "#7157FF", fontSize: 11, fontWeight: "800" },
+  playerPill: { backgroundColor: "#EEE9FF", paddingHorizontal: 15, paddingVertical: 7, borderRadius: 50 },
+  playerPillText: { color: "#633CFF", fontSize: 11, fontWeight: "900", letterSpacing: 0.8 },
+  permissionMic: { width: 120, height: 120, borderRadius: 60, backgroundColor: "#EEE9FF", alignItems: "center", justifyContent: "center" },
+  permissionEmoji: { fontSize: 48 },
+  testCard: { width: "100%", backgroundColor: "#fff", borderRadius: 26, padding: 20, alignItems: "center", elevation: 3 },
+  testStatus: { color: "#633CFF", fontSize: 12, fontWeight: "900", letterSpacing: 0.8 },
+  testHz: { color: "#8A838B", fontSize: 11, fontWeight: "700" },
+  wave: { height: 100, width: "100%", flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7 },
+  waveBar: { width: 7, backgroundColor: "#7157FF", borderRadius: 10 },
+  waiting: { color: "#8A838B", fontSize: 12, textAlign: "center" },
+  topDecoration: { position: "absolute", width: 260, height: 260, borderRadius: 130, backgroundColor: "#E9DEFF", top: -175, right: -90 },
+  bottomDecoration: { position: "absolute", width: 300, height: 300, borderRadius: 150, backgroundColor: "#F0E5FF", bottom: -210, left: -120 },
 
-// ======================================================
-// ESTILOS
-// ======================================================
-
-const styles =
-  StyleSheet.create({
-    container: {
-      flex: 1,
-      backgroundColor:
-        "#FFF9F6",
-      overflow: "hidden",
-    },
-
-    content: {
-      flex: 1,
-      paddingHorizontal: 24,
-      paddingTop: 55,
-      paddingBottom: 28,
-      alignItems: "center",
-      justifyContent:
-        "center",
-      zIndex: 2,
-    },
-
-    section: {
-      width: "100%",
-      maxWidth: 360,
-      alignItems: "center",
-      gap: 14,
-      marginTop: 24,
-    },
-
-    step: {
-      fontSize: 11,
-      fontWeight: "900",
-      letterSpacing: 1.5,
-      color: "#7157FF",
-    },
-
-    title: {
-      color: "#111111",
-      fontSize: 28,
-      lineHeight: 34,
-      fontWeight: "900",
-      textAlign: "center",
-    },
-
-    subtitle: {
-      maxWidth: 320,
-      color: "#777078",
-      fontSize: 14,
-      lineHeight: 21,
-      textAlign: "center",
-    },
-
-    statusRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 7,
-      marginTop: 2,
-    },
-
-    statusDot: {
-      width: 7,
-      height: 7,
-      borderRadius: 10,
-    },
-
-    online: {
-      backgroundColor:
-        "#7157FF",
-    },
-
-    offline: {
-      backgroundColor:
-        "#B6AFB6",
-    },
-
-    statusText: {
-      color: "#777078",
-      fontSize: 11,
-      fontWeight: "700",
-    },
-
-    playerPill: {
-      backgroundColor:
-        "#EEE9FF",
-      paddingHorizontal: 15,
-      paddingVertical: 7,
-      borderRadius: 50,
-    },
-
-    playerPillText: {
-      color: "#633CFF",
-      fontSize: 11,
-      fontWeight: "900",
-      letterSpacing: 0.8,
-    },
-
-    permissionMic: {
-      width: 120,
-      height: 120,
-      borderRadius: 60,
-      backgroundColor:
-        "#EEE9FF",
-      alignItems: "center",
-      justifyContent:
-        "center",
-      marginVertical: 4,
-    },
-
-    permissionEmoji: {
-      fontSize: 48,
-    },
-
-    privacy: {
-      maxWidth: 280,
-      color: "#999299",
-      fontSize: 11,
-      lineHeight: 16,
-      textAlign: "center",
-    },
-
-    micCard: {
-      width: "100%",
-      backgroundColor:
-        "#FFFFFF",
-      borderRadius: 26,
-      paddingHorizontal: 20,
-      paddingVertical: 18,
-      alignItems: "center",
-
-      shadowColor: "#000",
-      shadowOpacity: 0.06,
-      shadowRadius: 15,
-      shadowOffset: {
-        width: 0,
-        height: 7,
-      },
-
-      elevation: 3,
-    },
-
-    liveRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 7,
-      marginBottom: 10,
-    },
-
-    liveDot: {
-      width: 8,
-      height: 8,
-      borderRadius: 8,
-      backgroundColor:
-        "#B9B4BC",
-    },
-
-    liveDotActive: {
-      backgroundColor:
-        "#7157FF",
-    },
-
-    liveText: {
-      color: "#7157FF",
-      fontSize: 10,
-      fontWeight: "900",
-      letterSpacing: 1.2,
-    },
-
-    microphoneCircle: {
-      width: 64,
-      height: 64,
-      borderRadius: 32,
-      backgroundColor:
-        "#F1EDFF",
-      alignItems: "center",
-      justifyContent:
-        "center",
-      marginBottom: 5,
-    },
-
-    microphoneEmoji: {
-      fontSize: 30,
-    },
-
-    frequency: {
-      color: "#111111",
-      fontSize: 37,
-      fontWeight: "900",
-      letterSpacing: -1,
-    },
-
-    detectionText: {
-      color: "#777078",
-      fontSize: 11,
-      fontWeight: "700",
-      marginTop: -2,
-      marginBottom: 12,
-    },
-
-    volumeContainer: {
-      width: "100%",
-      height: 9,
-      backgroundColor:
-        "#EEE9FF",
-      borderRadius: 20,
-      overflow: "hidden",
-    },
-
-    volumeBar: {
-      height: "100%",
-      backgroundColor:
-        "#7157FF",
-      borderRadius: 20,
-    },
-
-    wave: {
-      height: 58,
-      width: "100%",
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent:
-        "center",
-      gap: 5,
-      marginVertical: 5,
-    },
-
-    waveBar: {
-      width: 5,
-      minHeight: 7,
-      backgroundColor:
-        "#7157FF",
-      borderRadius: 10,
-    },
-
-    sendingBox: {
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent:
-        "center",
-      gap: 7,
-      width: "100%",
-      paddingTop: 11,
-      borderTopWidth: 1,
-      borderTopColor:
-        "#F0ECF2",
-    },
-
-    sendingDot: {
-      width: 6,
-      height: 6,
-      borderRadius: 6,
-      backgroundColor:
-        "#7157FF",
-    },
-
-    sendingText: {
-      color: "#633CFF",
-      fontSize: 9,
-      fontWeight: "900",
-      letterSpacing: 0.7,
-    },
-
-    roomConnected: {
-      backgroundColor:
-        "#EEE9FF",
-      paddingHorizontal: 15,
-      paddingVertical: 8,
-      borderRadius: 30,
-    },
-
-    roomConnectedText: {
-      color: "#633CFF",
-      fontSize: 10,
-      fontWeight: "900",
-      letterSpacing: 0.5,
-    },
-
-    waiting: {
-      color: "#8A838B",
-      fontSize: 12,
-      textAlign: "center",
-    },
-
-    gameContainer: { flex: 1, backgroundColor: "#FFF9F6", alignItems: "center", justifyContent: "center", paddingHorizontal: 24 },
-    gameMiniHz: { position: "absolute", top: 54, right: 22, color: "#8A838B", fontSize: 12, fontWeight: "800" },
-    countdownWrap: { alignItems: "center", justifyContent: "center" },
-    countdownLabel: { color: "#7157FF", fontSize: 13, fontWeight: "900", letterSpacing: 2, marginBottom: 12 },
-    countdownNumber: { color: "#111111", fontSize: 112, lineHeight: 125, fontWeight: "900", letterSpacing: -5 },
-    gameMicArea: { width: "100%", alignItems: "center", justifyContent: "center" },
-    gameMicGlow: { width: 190, height: 190, borderRadius: 95, backgroundColor: "#EEE9FF", alignItems: "center", justifyContent: "center", borderWidth: 5, borderColor: "#E4DCFF" },
-    gameMicGlowActive: { backgroundColor: "#E5DDFF", borderColor: "#7157FF" },
-    gameMicEmoji: { fontSize: 82 },
-    gameWave: { height: 110, width: "100%", flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, marginTop: 28 },
-    gameWaveBar: { width: 7, minHeight: 10, backgroundColor: "#7157FF", borderRadius: 20 },
-    gameStatus: { marginTop: 6, color: "#111111", fontSize: 17, fontWeight: "900", letterSpacing: 1 },
-    gamePlayer: { marginTop: 8, color: "#8A838B", fontSize: 11, fontWeight: "800", letterSpacing: 0.6 },
-
-    topDecoration: {
-      position: "absolute",
-      width: 260,
-      height: 260,
-      borderRadius: 130,
-      backgroundColor:
-        "#E9DEFF",
-      top: -175,
-      right: -90,
-    },
-
-    bottomDecoration: {
-      position: "absolute",
-      width: 300,
-      height: 300,
-      borderRadius: 150,
-      backgroundColor:
-        "#F0E5FF",
-      bottom: -210,
-      left: -120,
-    },
-  });
+  gameContainer: { flex: 1, backgroundColor: "#FFF9F6", alignItems: "center", justifyContent: "center", padding: 28 },
+  miniBrand: { position: "absolute", top: 60, fontSize: 17, fontWeight: "900", letterSpacing: -0.5, color: "#111" },
+  purple: { color: "#7157FF" },
+  countdown: { fontSize: 120, fontWeight: "900", color: "#7157FF" },
+  hzCorner: { position: "absolute", top: 55, right: 24, backgroundColor: "#EEE9FF", borderRadius: 20, paddingHorizontal: 11, paddingVertical: 6 },
+  hzSmall: { color: "#633CFF", fontSize: 11, fontWeight: "800" },
+  recordingBadge: { position: "absolute", top: 55, left: 24, backgroundColor: "#FFE8E8", borderRadius: 20, paddingHorizontal: 11, paddingVertical: 6 },
+  recordingText: { color: "#C73D3D", fontSize: 9, fontWeight: "900" },
+  bigMic: { width: 190, height: 190, borderRadius: 95, backgroundColor: "#EEE9FF", alignItems: "center", justifyContent: "center", transform: [{ scale: 1 }] },
+  bigMicActive: { transform: [{ scale: 1.06 }], backgroundColor: "#E4DBFF" },
+  bigMicEmoji: { fontSize: 86 },
+  captureText: { marginTop: 5, color: "#A19AA3", fontSize: 12, fontWeight: "900", letterSpacing: 1 },
+  captureTextActive: { color: "#633CFF" },
+  gameHint: { marginTop: 16, color: "#8A838B", fontSize: 12, textAlign: "center" },
+  resultTitle: { fontSize: 34, fontWeight: "900", color: "#111", textAlign: "center" },
+  resultSubtitle: { marginTop: 10, maxWidth: 300, color: "#777078", fontSize: 14, lineHeight: 21, textAlign: "center" },
+  playButton: { marginTop: 28, backgroundColor: "#7157FF", paddingHorizontal: 28, paddingVertical: 17, borderRadius: 18 },
+  playButtonText: { color: "#fff", fontSize: 14, fontWeight: "900" },
+});
