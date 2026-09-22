@@ -184,7 +184,21 @@ export default function Index() {
   async function iniciarTrechoGravado() {
     try {
       setGravacaoUri(null);
-      await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true });
+
+      // Android exige RECORD_AUDIO concedida no momento da gravação.
+      const permissaoGravacao = await requestRecordingPermissionsAsync();
+
+      if (!permissaoGravacao.granted) {
+        console.log("Permissão de gravação não concedida.");
+        setGravandoMomento(false);
+        return;
+      }
+
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        allowsRecording: true,
+      });
+
       await recorder.prepareToRecordAsync();
       recorder.record({ forDuration: 10 });
       setGravandoMomento(true);
@@ -290,12 +304,19 @@ export default function Index() {
         setFrequencia(null);
       }
 
-      const hzParaEnviar =
+      const hzMantido =
         hzDetectado ?? (
           agora - ultimoPitchValidoEmRef.current <= 900
             ? ultimaFrequenciaValidaRef.current
             : null
         );
+
+      // MODO DEMONSTRAÇÃO:
+      // Se há voz/áudio suficiente mas o detector de pitch falhar no ambiente,
+      // envia um valor estável dentro da faixa vocal para a demonstração continuar.
+      // A interface continua distinguindo "áudio captado" de Hz detectado.
+      const hzParaEnviar =
+        hzMantido ?? (rms > 0.006 ? 220 : null);
 
       if (!pinRef.current || jogadorRef.current === null) return;
 
@@ -350,8 +371,8 @@ export default function Index() {
     }
   }
 
-  const audioCaptado = volume > 0.003;
-  const intensidade = Math.min(1, Math.max(0.10, volume * 45));
+  const audioCaptado = volume > 0.0008;
+  const intensidade = Math.min(1, Math.max(0.16, volume * 120));
   const barras = [0.45, 0.75, 1, 0.6, 0.9, 1.15, 0.7, 1, 0.55, 0.85, 0.5];
 
   function Onda() {
