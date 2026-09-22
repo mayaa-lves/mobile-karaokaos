@@ -23,8 +23,7 @@ import PrimaryButton from "../../components/PrimaryButton";
 // CONFIGURAÇÃO
 // ======================================================
 
-const SERVIDOR =
-  "http://192.168.15.15:8000";
+const SERVIDOR = "http://10.142.227.93:8000";
 
 const socket = io(SERVIDOR, {
   autoConnect: false,
