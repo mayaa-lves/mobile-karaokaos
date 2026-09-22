@@ -21,44 +21,135 @@ const socket = io(SERVIDOR, { autoConnect: false });
 type Etapa = "pin" | "nome" | "microfone" | "pronto" | "contagem" | "jogo" | "resultado";
 type RespostaEntrada = { sucesso: boolean; erro?: string; jogador?: number };
 
-function detectarFrequencia(amostras: Float32Array, sampleRate: number): number | null {
-  if (amostras.length < 2) return null;
+function detectarFrequencia(
+  amostrasOriginais: Float32Array,
+  sampleRate: number
+): number | null {
+  /*
+    Detector otimizado para voz.
+    Usa somente uma janela curta e remove o valor médio (DC).
+    Isso deixa o reconhecimento bem mais rápido e estável no celular.
+  */
+  const TAMANHO = 2048;
 
-  // Analisa no máximo ~2048 amostras para reduzir travamentos.
-  const passo = Math.max(1, Math.floor(amostras.length / 2048));
-  const reduzidas: number[] = [];
-  for (let i = 0; i < amostras.length; i += passo) reduzidas.push(amostras[i]);
+  if (amostrasOriginais.length < 512) {
+    return null;
+  }
 
-  let soma = 0;
-  for (const a of reduzidas) soma += a * a;
-  const rms = Math.sqrt(soma / reduzidas.length);
-  if (rms < 0.012) return null;
+  const inicio = Math.max(0, amostrasOriginais.length - TAMANHO);
+  const n = amostrasOriginais.length - inicio;
+  const amostras = new Float32Array(n);
 
-  const menorLag = Math.max(1, Math.floor(sampleRate / passo / 1000));
-  const maiorLag = Math.min(Math.floor(sampleRate / passo / 80), reduzidas.length - 1);
+  let media = 0;
+  for (let i = 0; i < n; i++) {
+    media += amostrasOriginais[inicio + i];
+  }
+  media /= n;
+
+  let energia = 0;
+  for (let i = 0; i < n; i++) {
+    const valor = amostrasOriginais[inicio + i] - media;
+    amostras[i] = valor;
+    energia += valor * valor;
+  }
+
+  const rms = Math.sqrt(energia / n);
+
+  // Mais sensível que antes para voz normal.
+  if (rms < 0.004) {
+    return null;
+  }
+
+  // Faixa útil para voz cantada.
+  const menorLag = Math.floor(sampleRate / 700);
+  const maiorLag = Math.min(
+    Math.floor(sampleRate / 75),
+    Math.floor(n / 2)
+  );
 
   let melhorLag = -1;
-  let melhor = 0;
+  let melhorCorrelacao = -1;
 
-  for (let lag = menorLag; lag <= maiorLag; lag++) {
-    let correlacao = 0, energiaA = 0, energiaB = 0;
-    const limite = reduzidas.length - lag;
-    for (let i = 0; i < limite; i++) {
-      const a = reduzidas[i];
-      const b = reduzidas[i + lag];
-      correlacao += a * b;
+  /*
+    Compara apenas uma parte fixa do buffer.
+    Muito mais leve do que percorrer o buffer inteiro para cada lag.
+  */
+  const limiteBase = Math.min(1024, n - maiorLag);
+
+  for (let lag = menorLag; lag <= maiorLag; lag += 2) {
+    let produto = 0;
+    let energiaA = 0;
+    let energiaB = 0;
+
+    for (let i = 0; i < limiteBase; i += 2) {
+      const a = amostras[i];
+      const b = amostras[i + lag];
+
+      produto += a * b;
       energiaA += a * a;
       energiaB += b * b;
     }
-    const den = Math.sqrt(energiaA * energiaB);
-    if (!den) continue;
-    const c = correlacao / den;
-    if (c > melhor) { melhor = c; melhorLag = lag; }
+
+    const denominador = Math.sqrt(energiaA * energiaB);
+    if (denominador <= 0) continue;
+
+    const correlacao = produto / denominador;
+
+    if (correlacao > melhorCorrelacao) {
+      melhorCorrelacao = correlacao;
+      melhorLag = lag;
+    }
   }
 
-  if (melhorLag <= 0 || melhor < 0.60) return null;
-  const hz = (sampleRate / passo) / melhorLag;
-  return hz >= 80 && hz <= 1000 ? hz : null;
+  // Ambiente barulhento: 0.42 é deliberadamente mais tolerante.
+  if (melhorLag <= 0 || melhorCorrelacao < 0.42) {
+    return null;
+  }
+
+  // Refina ao redor do melhor lag.
+  let lagFinal = melhorLag;
+  let correlacaoFinal = melhorCorrelacao;
+
+  for (
+    let lag = Math.max(menorLag, melhorLag - 3);
+    lag <= Math.min(maiorLag, melhorLag + 3);
+    lag++
+  ) {
+    let produto = 0;
+    let energiaA = 0;
+    let energiaB = 0;
+
+    for (let i = 0; i < limiteBase; i += 2) {
+      const a = amostras[i];
+      const b = amostras[i + lag];
+
+      produto += a * b;
+      energiaA += a * a;
+      energiaB += b * b;
+    }
+
+    const denominador = Math.sqrt(energiaA * energiaB);
+    if (denominador <= 0) continue;
+
+    const correlacao = produto / denominador;
+
+    if (correlacao > correlacaoFinal) {
+      correlacaoFinal = correlacao;
+      lagFinal = lag;
+    }
+  }
+
+  const frequencia = sampleRate / lagFinal;
+
+  if (
+    !Number.isFinite(frequencia) ||
+    frequencia < 75 ||
+    frequencia > 700
+  ) {
+    return null;
+  }
+
+  return frequencia;
 }
 
 export default function Index() {
@@ -79,6 +170,8 @@ export default function Index() {
   const pinRef = useRef("");
   const jogadorRef = useRef<number | null>(null);
   const ultimoEnvioRef = useRef(0);
+  const ultimaFrequenciaValidaRef = useRef<number | null>(null);
+  const ultimoPitchValidoEmRef = useRef(0);
   const timerInicioRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const timerFimRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -185,16 +278,34 @@ export default function Index() {
 
       // Pitch só é calculado/enviado ~6x/s para aliviar o celular.
       if (agora - ultimoEnvioRef.current < 160) return;
-      const hz = detectarFrequencia(amostras, 44100);
-      setFrequencia(hz);
+      const hzDetectado = detectarFrequencia(amostras, 44100);
+
+      // Evita o Hz piscando para “—” entre buffers.
+      if (hzDetectado !== null) {
+        ultimaFrequenciaValidaRef.current = hzDetectado;
+        ultimoPitchValidoEmRef.current = agora;
+        setFrequencia(hzDetectado);
+      } else if (agora - ultimoPitchValidoEmRef.current > 900) {
+        ultimaFrequenciaValidaRef.current = null;
+        setFrequencia(null);
+      }
+
+      const hzParaEnviar =
+        hzDetectado ?? (
+          agora - ultimoPitchValidoEmRef.current <= 900
+            ? ultimaFrequenciaValidaRef.current
+            : null
+        );
 
       if (!pinRef.current || jogadorRef.current === null) return;
+
       ultimoEnvioRef.current = agora;
+
       socket.emit("dados_microfone", {
         pin: pinRef.current,
         jogador: jogadorRef.current,
         volume: rms,
-        frequencia: hz,
+        frequencia: hzParaEnviar,
         timestamp: agora,
       });
     },
@@ -239,8 +350,8 @@ export default function Index() {
     }
   }
 
-  const audioCaptado = volume > 0.008;
-  const intensidade = Math.min(1, Math.max(0.08, volume * 18));
+  const audioCaptado = volume > 0.003;
+  const intensidade = Math.min(1, Math.max(0.10, volume * 45));
   const barras = [0.45, 0.75, 1, 0.6, 0.9, 1.15, 0.7, 1, 0.55, 0.85, 0.5];
 
   function Onda() {
