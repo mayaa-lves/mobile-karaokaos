@@ -1,166 +1,264 @@
-# 🎤 Karaokaos
+# 🎤 KaraoKaos — Mobile
 
-**Karaokaos** é um jogo de karaokê multiplayer desenvolvido como projeto da disciplina de **Dispositivos Móveis**, com o objetivo de demonstrar o uso do **microfone como sensor em dispositivos móveis**.
+Aplicativo mobile do **KaraoKaos**, desenvolvido para transformar o celular do jogador em um microfone conectado ao karaokê executado no computador.
 
-A proposta é transformar dois celulares em microfones/controladores enquanto uma interface principal, exibida no computador, conduz a partida com letras sincronizadas, pontuação, análise de afinação e desafios especiais.
+O aplicativo captura o áudio do microfone em tempo real, analisa informações do sinal e envia os dados para o servidor durante a partida. Além disso, um trecho de aproximadamente 10 segundos da apresentação é gravado aleatoriamente e pode ser reproduzido ao final.
 
-> 🚧 Projeto em desenvolvimento.
+## ✨ Principais funcionalidades
 
----
-
-## 🎮 Como funciona
-
-O Karaokaos será composto por três partes principais:
-
-### 📱 Aplicativo Mobile
-
-Cada jogador utiliza seu próprio celular para:
-
-- entrar em uma sala;
-- identificar-se como jogador;
-- conceder acesso ao microfone;
-- capturar informações da voz;
-- enviar os dados para a partida em tempo real.
-
-O aplicativo mobile está sendo desenvolvido com **React Native + Expo**.
-
-### 💻 Interface principal
-
-O computador funciona como a tela compartilhada da partida.
-
-Nele serão exibidos:
-
-- música selecionada;
-- letra sincronizada;
-- jogador responsável por cada trecho;
-- pontuação;
-- feedback de afinação;
-- combos;
-- desafios Chaos;
-- resultado final.
-
-### 🌐 Comunicação
-
-Os celulares e o computador serão conectados por um servidor responsável pela comunicação em tempo real entre os jogadores e a partida.
-
-A arquitetura planejada é:
-
-```text
-📱 Jogador 1 ───┐
-                │
-                ▼
-             🌐 Servidor ───── 💻 Karaokaos
-                ▲
-                │
-📱 Jogador 2 ───┘
-```
-
----
-
-## 🎵 Mecânica da partida
-
-A música é reproduzida integralmente durante a partida utilizando sua versão instrumental.
-
-Os trechos da música são distribuídos entre os jogadores:
-
-```text
-🟣 Jogador 1 → canta um trecho
-🟠 Jogador 2 → canta o próximo
-🟣🟠 Dueto   → ambos cantam
-```
-
-Durante o trecho de um jogador, somente sua entrada de áudio é considerada para aquela parte da pontuação. Isso ajuda a reduzir interferências entre os dois microfones.
-
-A partida continua do início ao fim da música, sem divisão em rodadas.
-
----
-
-## ⚡ Chaos Challenges
-
-Durante a música, desafios especiais aparecem temporariamente sem interromper a letra ou o instrumental.
-
-Alguns exemplos planejados:
-
-- cantar mais baixo;
-- sustentar uma nota;
-- substituir uma palavra;
-- cantar determinado trecho em dueto.
-
-Os desafios possuem duração limitada e podem conceder pontos extras.
-
----
+- Entrada em salas por PIN;
+- Identificação do jogador;
+- Solicitação de permissão para acesso ao microfone;
+- Captura de áudio em tempo real;
+- Análise da intensidade do áudio por RMS;
+- Detecção da frequência da voz em Hz;
+- Comunicação em tempo real com o servidor;
+- Interface visual que reage ao áudio captado;
+- Sincronização do início e fim da partida;
+- Gravação aleatória de aproximadamente 10 segundos;
+- Reprodução do trecho gravado ao final.
 
 ## 🛠️ Tecnologias
 
-Tecnologias planejadas para o projeto:
+- React Native
+- TypeScript
+- Expo
+- Expo Router
+- `expo-audio`
+- Socket.IO Client
 
-- **React Native**
-- **Expo**
-- **TypeScript**
-- **React**
-- **Node.js**
-- **Socket.IO**
-- **Expo Audio**
+## 🎤 Como funciona a captação de áudio?
 
-A arquitetura e as tecnologias podem sofrer alterações durante o desenvolvimento do MVP.
+Antes de utilizar o microfone, o aplicativo solicita autorização do usuário através de:
 
----
-
-## 📂 Estrutura planejada
-
-```text
-Karaokaos/
-│
-├── mobile-karaokaos/    # Aplicativo dos jogadores
-├── server-karaokaos/    # Servidor e comunicação em tempo real
-└── web-karaokaos/       # Interface principal do computador
+```ts
+requestRecordingPermissionsAsync()
 ```
 
-Atualmente, o desenvolvimento está concentrado no aplicativo mobile.
+Essa operação é assíncrona porque o aplicativo precisa aguardar a decisão do usuário antes de acessar o microfone.
 
----
+Após a autorização, a captura é iniciada utilizando `useAudioStream`.
 
-## 🚧 Status
+O áudio é configurado com:
 
-### Em desenvolvimento
+```text
+Sample Rate: 44.100 Hz
+Canais: 1 (mono)
+```
 
-Primeira etapa:
+O fluxo pode ser resumido em:
 
-- [x] Criar projeto Expo
-- [ ] Criar interface inicial do aplicativo
-- [ ] Solicitar permissão do microfone
-- [ ] Capturar áudio pelo dispositivo
-- [ ] Analisar dados do microfone
-- [ ] Criar sistema de salas
-- [ ] Conectar dois jogadores
-- [ ] Integrar aplicativo e interface do computador
-- [ ] Implementar música e letras sincronizadas
-- [ ] Implementar sistema de pontuação
-- [ ] Implementar Chaos Challenges
-- [ ] Criar tela de resultado final
+```text
+Microfone
+   ↓
+useAudioStream
+   ↓
+onBuffer()
+   ↓
+Amostras de áudio
+   ↓
+Float32Array
+   ↓
+RMS + análise de frequência
+   ↓
+Socket.IO
+   ↓
+Servidor
+```
 
----
+## 📊 RMS
 
-## 🎯 Objetivo acadêmico
+O **RMS (Root Mean Square)** é utilizado para analisar a intensidade do sinal captado pelo microfone.
 
-O projeto foi desenvolvido para demonstrar, de maneira prática e interativa, como o **microfone de um dispositivo móvel pode funcionar como sensor**, transformando ondas sonoras em dados digitais que podem ser processados por uma aplicação.
+De forma simplificada:
 
-Além da captura de áudio, o projeto explora conceitos como análise de frequência, comunicação em tempo real e integração entre dispositivos.
+```text
+RMS baixo → som fraco ou silêncio
+RMS alto  → som mais intenso
+```
 
----
+O RMS também é utilizado para fazer as ondas da interface reagirem ao áudio.
 
-## 👥 Desenvolvedores
+Por isso, a detecção de áudio e a detecção de frequência são processos diferentes: o aplicativo pode identificar que existe som sendo captado mesmo quando ainda não conseguiu determinar seu tom.
 
-Projeto desenvolvido por:
+## 🎵 Detecção de frequência
 
-- **[Nome]**
-- **[Nome]**
+A função `detectarFrequencia()` analisa as amostras captadas pelo microfone e tenta encontrar a frequência fundamental da voz.
 
-Curso Técnico em Desenvolvimento de Sistemas  
-Disciplina de Dispositivos Móveis
+O resultado é representado em **Hertz (Hz)**.
 
----
+Exemplo:
 
-## 📄 Licença
+```text
+220 Hz
+```
 
-Projeto desenvolvido para fins educacionais.
+Essa informação é enviada para a aplicação web e utilizada pelo sistema de análise da partida.
+
+## 📡 Comunicação com o servidor
+
+A comunicação em tempo real é feita utilizando **Socket.IO**.
+
+Durante a partida, o celular envia informações como:
+
+```text
+Jogador
+Volume
+Frequência
+Timestamp
+```
+
+O evento principal utilizado para isso é:
+
+```text
+dados_microfone
+```
+
+O servidor recebe essas informações e as encaminha para o computador.
+
+## 🔴 Gravação de 10 segundos
+
+Durante cada partida, o aplicativo escolhe automaticamente um momento para gravar aproximadamente **10 segundos da apresentação do jogador**.
+
+O processo utiliza o `AudioRecorder` do `expo-audio`.
+
+Fluxo:
+
+```text
+Partida começa
+      ↓
+Momento aleatório é escolhido
+      ↓
+Permissão do microfone é verificada
+      ↓
+Gravação começa
+      ↓
+~10 segundos
+      ↓
+Gravação é encerrada
+      ↓
+Arquivo é armazenado
+      ↓
+Partida termina
+      ↓
+Jogador pode ouvir o trecho
+```
+
+Durante a captura, a interface informa:
+
+```text
+● GRAVANDO MOMENTO
+```
+
+Ao final, o trecho pode ser reproduzido pelo próprio aplicativo.
+
+## 📱 Fluxo do aplicativo
+
+```text
+PIN da sala
+    ↓
+Nome do jogador
+    ↓
+Permissão do microfone
+    ↓
+Teste de captação
+    ↓
+Jogador pronto
+    ↓
+3 • 2 • 1 • VAI!
+    ↓
+Partida
+    ↓
+Gravação de um trecho
+    ↓
+Resultado
+    ↓
+Reprodução da gravação
+```
+
+## 🚀 Como executar
+
+### 1. Clone o repositório
+
+```bash
+git clone https://github.com/mayaa-lves/mobile-karaokaos.git
+cd mobile-karaokaos
+```
+
+### 2. Instale as dependências
+
+```bash
+npm install
+```
+
+### 3. Configure o endereço do servidor
+
+No código do aplicativo existe a constante responsável pelo endereço do backend:
+
+```ts
+const SERVIDOR = "http://IP_DO_COMPUTADOR:8000";
+```
+
+Substitua `IP_DO_COMPUTADOR` pelo IPv4 da máquina que está executando o servidor.
+
+No Windows, o endereço pode ser consultado com:
+
+```bash
+ipconfig
+```
+
+### 4. Execute o projeto
+
+```bash
+npx expo start --clear
+```
+
+Caso necessário no PowerShell:
+
+```bash
+npx.cmd expo start --clear
+```
+
+Depois, abra o **Expo Go** no celular e escaneie o QR Code.
+
+> O celular e o computador devem estar conectados à mesma rede local.
+
+## 🔐 Permissão do microfone
+
+No Android, o aplicativo precisa ter acesso ao microfone.
+
+Caso apareça um erro relacionado a `RECORD_AUDIO`, verifique:
+
+```text
+Configurações
+→ Aplicativos
+→ Expo Go
+→ Permissões
+→ Microfone
+→ Permitir durante o uso do app
+```
+
+## ⚠️ Expo Go
+
+A versão do Expo Go instalada no celular precisa ser compatível com a versão do Expo utilizada pelo projeto.
+
+Caso apareça:
+
+```text
+Project is incompatible with this version of Expo Go
+```
+
+atualize o **Expo Go** pela Play Store.
+
+## 🔗 Outros módulos
+
+O KaraoKaos é dividido em três aplicações:
+
+- [💻 Web](https://github.com/mayaa-lves/web-karaokaos)
+- [🐍 Server](https://github.com/mayaa-lves/server-karaokaos)
+
+## 👩‍💻 Projeto acadêmico
+
+Projeto desenvolvido como atividade da disciplina de **Mobile**, no Curso Técnico em Desenvolvimento de Sistemas — SENAI.
+
+O objetivo principal foi explorar o uso do **microfone como sensor**, aplicando captura e processamento de áudio em uma experiência interativa.
