@@ -15,7 +15,7 @@ import NameInput from "../../components/NameInput";
 import PinInput from "../../components/PinInput";
 import PrimaryButton from "../../components/PrimaryButton";
 
-const SERVIDOR = "http://10.142.227.93:8000";
+const SERVIDOR = "http://10.142.227.123:8000";
 const socket = io(SERVIDOR, { autoConnect: false });
 
 type Etapa = "pin" | "nome" | "microfone" | "pronto" | "contagem" | "jogo" | "resultado";
